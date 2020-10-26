@@ -1,17 +1,85 @@
 use log::{error, info, warn};
 use simple_logger::SimpleLogger;
-use std::path::{Path, PathBuf};
-use std::process::{exit, Command, Stdio};
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+    path::{Path, PathBuf},
+    process::{Command, exit, Stdio},
+};
 use structopt::StructOpt;
 use toml::Value;
 
 #[derive(StructOpt, Debug)]
-#[structopt(name = "remocom", bin_name = "cargo")]
-enum Options {
+#[structopt(name = "remocom", bin_name = "remocom")]
+enum Opts {
     #[structopt(name = "remote")]
     Remote {
-        #[structopt(short = "r", long = "remote", help = "Remote ssh build server")]
+        #[structopt(
+            short = "r",
+            long = "remote", 
+            help = "Remote ssh build server")]
         remote: Option<String>,
+
+        #[structopt(
+            short = "b",
+            long = "build-env",
+            help = "Set remote environment variables. RUST_BACKTRACE, CC, LIB, etc. ",
+            default_value = "RUST_BACKTRACE=1",
+        )]
+        build_env: String,
+
+        #[structopt(
+            short = "d",
+            long = "rustup-default",
+            help = "Rustup default (stable|beta|nightly)",
+            default_value = "stable",
+        )]
+        rustup_default: String,
+
+        #[structopt(
+            short = "e",
+            long = "env",
+            help = "Environment profile. default_value = /etc/profile",
+            default_value = "/etc/profile",
+        )] 
+        env: String,
+
+        #[structopt(
+            short = "c",
+            long = "copy-back",
+            help = "Transfers the target folder or file back to the local machine",
+        )] 
+        copy_back: Option<Option<String>>,
+
+        #[structopt(
+            long = "no-copy-lock",
+            help = "Do not transfer the Cargo.lock back to the local machine",
+        )] 
+        no_copy_lock: bool,
+
+        #[structopt(
+            long = "manifest-path",
+            help = "Path to the manifest to execute",
+            default_value = "Cargo.toml",
+            parse(from_os_str)
+        )]
+        manifest_path: PathBuf,
+
+        #[structopt(
+            short = "h",
+            long = "transfer-hidden",
+            help = "Transfer hidden files and directories to the build server",
+        )] 
+        hidden: bool,
+
+        #[structopt(help = "cargo command that will be executed remotely")] 
+        command: String,
+
+        #[structopt(
+            help = "cargo options and flags that will be applied remotely",
+            name = "remote options",
+        )] 
+        options: Vec<String>,
     },
 }
 
@@ -45,11 +113,20 @@ fn config_from_file(config_path: &Path) -> Option<Value> {
 
 fn main() {
     SimpleLogger::new().init().unwrap();
-    log::info!("Log set");
+    info!("Log set");
 
-    let Options::Remote {
+    let Opts::Remote {
         remote,
-    } = Options::from_args();
+        build_env,
+        rustup_default,
+        env,
+        copy_back,
+        no_copy_lock,
+        manifest_path,
+        hidden,
+        command,
+        options,
+    } = Opts::from_args();
 
     let mut cli_metadata = cargo_metadata::MetadataCommand::new();
     let manifest_path = "Cargo.toml"; //TODO Implement as a cli argument option
@@ -77,4 +154,67 @@ fn main() {
         error!("No remote server defined (use remcom-config or --remote flag)");
         exit(-3);
     });
+
+    // This is a unique build path created using the project's hashed dir name.
+    let mut hasher = DefaultHasher::new();
+    project_dir.hash(&mut hasher);
+    let build_path = format!("~/remote-builds/{}/", hasher.finish());
+
+    info!("Sources are being transferred to your build server.");
+    // Transfers the project to the user's build server
+    let mut rsync_to = Command::new("rsync");
+
+    rsync_to
+        .arg("-a".to_owned())
+        .arg("--delete")
+        .arg("--compress")
+        .arg("--info=progress2")
+        .arg("--exclude")
+        .arg("--target");
+    
+        if !hidden {
+            rsync_to.arg("--exclude").arg(".*");
+        }
+
+        rsync_to
+            .arg("--rsync-path")
+            .arg("mkdir -p remote-builds && rsync")
+            .arg(format!("{}/", project_dir.to_string_lossy()))
+            .arg(format!("{}:{}", build_server, build_path))
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .stdin(Stdio::inherit())
+            .output()
+            .unwrap_or_else(|e| {
+                error!("Failed to transfer project to build server (error: {})", e);
+                exit(-4);
+            });
+        
+        log::info!("Build ENV: {:?}", build_env);
+        log::info!("Environment profile: {:?}", env);
+        log::info!("Build path: {:?}", build_path);
+
+        let build_command = format!(
+            "source {}; rustup default {}; cd {}; {} cargo {} {}",
+            env,
+            rustup_default,
+            build_path,
+            build_env,
+            command,
+            options.join(" ")
+        );
+
+        info!("Starting build process...");
+        let output = Command::new("ssh")
+            .arg("-t")
+            .arg(&build_server)
+            .arg(build_command)
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .stdin(Stdio::inherit())
+            .output()
+            .unwrap_or_else(|e| {
+                error!("Failed to run cargo command remotely (error: {})", e);
+                exit(-5);
+            });
 }
