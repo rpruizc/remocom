@@ -129,7 +129,6 @@ fn main() {
     } = Opts::from_args();
 
     let mut cli_metadata = cargo_metadata::MetadataCommand::new();
-    let manifest_path = "Cargo.toml"; //TODO Implement as a cli argument option
     cli_metadata.manifest_path(manifest_path).no_deps();
 
     let project_metadata = cli_metadata.exec().unwrap();
@@ -217,4 +216,53 @@ fn main() {
                 error!("Failed to run cargo command remotely (error: {})", e);
                 exit(-5);
             });
+        
+        if let Some(file_name) = copy_back {
+            log::info!("Transferring artifacts back to client");
+            let file_name = file_name.unwrap_or_else(String::new);
+            Command::new("rsync")
+                .arg("-a")
+                .arg("--delete")
+                .arg("--compress")
+                .arg("--info-progress2")
+                .arg(format!("{}:{}/target/{}", build_server, build_path, file_name))
+                .arg(format!("{}/target/{}", project_dir.to_string_lossy(), file_name))
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .stdin(Stdio::inherit())
+                .output()
+                .unwrap_or_else(|e| {
+                    log::error!(
+                        "Failed to transfer target back to local machine (error: {})",
+                        e
+                    );
+                    exit(-6);
+                });
+        }
+
+        if !no_copy_lock {
+            log::info!("Transferring Cargo.lock file back to the client");
+            Command::new("rsync")
+                .arg("-a")
+                .arg("--delete")
+                .arg("--compress")
+                .arg("--info=progress2")
+                .arg(format!("{}:{}/Cargo.lock", build_server, build_path))
+                .arg(format!("{}/Cargo.lock", project_dir.to_string_lossy()))
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .stdin(Stdio::inherit())
+                .output()
+                .unwrap_or_else(|e| {
+                    log::error!(
+                        "Failed to transfer Cargo.lock back to local machine (error: {})",
+                        e
+                    );
+                    exit(-7);
+                });
+        }
+
+        if !output.status.success() {
+            exit(output.status.code().unwrap_or(1))
+        }
 }
