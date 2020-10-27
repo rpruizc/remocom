@@ -10,7 +10,7 @@ use structopt::StructOpt;
 use toml::Value;
 
 #[derive(StructOpt, Debug)]
-#[structopt(name = "remocom", bin_name = "remocom")]
+#[structopt(name = "remocom", bin_name = "cargo")]
 enum Opts {
     #[structopt(name = "remote")]
     Remote {
@@ -39,8 +39,8 @@ enum Opts {
         #[structopt(
             short = "e",
             long = "env",
-            help = "Environment profile. default_value = /etc/profile",
-            default_value = "/etc/profile",
+            help = "Environment profile. default_value = ~/.profile",
+            default_value = "~/.profile",
         )] 
         env: String,
 
@@ -171,98 +171,98 @@ fn main() {
         .arg("--exclude")
         .arg("--target");
     
-        if !hidden {
-            rsync_to.arg("--exclude").arg(".*");
-        }
+    if !hidden {
+        rsync_to.arg("--exclude").arg(".*");
+    }
 
-        rsync_to
-            .arg("--rsync-path")
-            .arg("mkdir -p remote-builds && rsync")
-            .arg(format!("{}/", project_dir.to_string_lossy()))
-            .arg(format!("{}:{}", build_server, build_path))
+    rsync_to
+        .arg("--rsync-path")
+        .arg("mkdir -p remote-builds && rsync")
+        .arg(format!("{}/", project_dir.to_string_lossy()))
+        .arg(format!("{}:{}", build_server, build_path))
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .stdin(Stdio::inherit())
+        .output()
+        .unwrap_or_else(|e| {
+            error!("Failed to transfer project to build server (error: {})", e);
+            exit(-4);
+        });
+    
+    log::info!("Build ENV: {:?}", build_env);
+    log::info!("Environment profile: {:?}", env);
+    log::info!("Build path: {:?}", build_path);
+
+    let build_command = format!(
+        "source {}; rustup default {}; cd {}; {} cargo {} {}",
+        env,
+        rustup_default,
+        build_path,
+        build_env,
+        command,
+        options.join(" ")
+    );
+
+    info!("Starting build process...");
+    let output = Command::new("ssh")
+        .arg("-t")
+        .arg(&build_server)
+        .arg(build_command)
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .stdin(Stdio::inherit())
+        .output()
+        .unwrap_or_else(|e| {
+            error!("Failed to run cargo command remotely (error: {})", e);
+            exit(-5);
+        });
+    
+    if let Some(file_name) = copy_back {
+        log::info!("Transferring artifacts back to client");
+        let file_name = file_name.unwrap_or_else(String::new);
+        Command::new("rsync")
+            .arg("-a")
+            .arg("--delete")
+            .arg("--compress")
+            .arg("--info=progress2")
+            .arg(format!("{}:{}/target/{}", build_server, build_path, file_name))
+            .arg(format!("{}/target/{}", project_dir.to_string_lossy(), file_name))
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .stdin(Stdio::inherit())
             .output()
             .unwrap_or_else(|e| {
-                error!("Failed to transfer project to build server (error: {})", e);
-                exit(-4);
+                log::error!(
+                    "Failed to transfer target back to local machine (error: {})",
+                    e
+                );
+                exit(-6);
             });
-        
-        log::info!("Build ENV: {:?}", build_env);
-        log::info!("Environment profile: {:?}", env);
-        log::info!("Build path: {:?}", build_path);
+    }
 
-        let build_command = format!(
-            "source {}; rustup default {}; cd {}; {} cargo {} {}",
-            env,
-            rustup_default,
-            build_path,
-            build_env,
-            command,
-            options.join(" ")
-        );
-
-        info!("Starting build process...");
-        let output = Command::new("ssh")
-            .arg("-t")
-            .arg(&build_server)
-            .arg(build_command)
+    if !no_copy_lock {
+        log::info!("Transferring Cargo.lock file back to the client");
+        Command::new("rsync")
+            .arg("-a")
+            .arg("--delete")
+            .arg("--compress")
+            .arg("--info=progress2")
+            .arg(format!("{}:{}/Cargo.lock", build_server, build_path))
+            .arg(format!("{}/Cargo.lock", project_dir.to_string_lossy()))
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .stdin(Stdio::inherit())
             .output()
             .unwrap_or_else(|e| {
-                error!("Failed to run cargo command remotely (error: {})", e);
-                exit(-5);
+                log::error!(
+                    "Failed to transfer Cargo.lock back to local machine (error: {})",
+                    e
+                );
+                exit(-7);
             });
-        
-        if let Some(file_name) = copy_back {
-            log::info!("Transferring artifacts back to client");
-            let file_name = file_name.unwrap_or_else(String::new);
-            Command::new("rsync")
-                .arg("-a")
-                .arg("--delete")
-                .arg("--compress")
-                .arg("--info-progress2")
-                .arg(format!("{}:{}/target/{}", build_server, build_path, file_name))
-                .arg(format!("{}/target/{}", project_dir.to_string_lossy(), file_name))
-                .stdout(Stdio::inherit())
-                .stderr(Stdio::inherit())
-                .stdin(Stdio::inherit())
-                .output()
-                .unwrap_or_else(|e| {
-                    log::error!(
-                        "Failed to transfer target back to local machine (error: {})",
-                        e
-                    );
-                    exit(-6);
-                });
-        }
+    }
 
-        if !no_copy_lock {
-            log::info!("Transferring Cargo.lock file back to the client");
-            Command::new("rsync")
-                .arg("-a")
-                .arg("--delete")
-                .arg("--compress")
-                .arg("--info=progress2")
-                .arg(format!("{}:{}/Cargo.lock", build_server, build_path))
-                .arg(format!("{}/Cargo.lock", project_dir.to_string_lossy()))
-                .stdout(Stdio::inherit())
-                .stderr(Stdio::inherit())
-                .stdin(Stdio::inherit())
-                .output()
-                .unwrap_or_else(|e| {
-                    log::error!(
-                        "Failed to transfer Cargo.lock back to local machine (error: {})",
-                        e
-                    );
-                    exit(-7);
-                });
-        }
-
-        if !output.status.success() {
-            exit(output.status.code().unwrap_or(1))
-        }
+    if !output.status.success() {
+        exit(output.status.code().unwrap_or(1))
+    }
 }
